@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net/http"
 	"os"
 	"reflect"
 	"sync"
@@ -62,6 +63,18 @@ type wsConn struct {
 	stopPings        func()
 	stop             <-chan struct{}
 	exiting          chan struct{}
+
+	ticker        *time.Ticker
+	curAddr       string
+	curHeader     http.Header
+	switchFactory func(SwitchConnectInfo) (*websocket.Conn, error)
+	switchBackoff backoff
+	switchTarget  []SwitchConnectInfo
+	switchFile    string
+	clientType    string
+
+	pendingLk sync.Mutex
+	pending   map[interface{}]clientRequest
 
 	// incoming messages
 	incoming    chan io.Reader

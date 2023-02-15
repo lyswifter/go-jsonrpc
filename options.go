@@ -15,6 +15,11 @@ type clientHandler struct {
 	hnd interface{}
 }
 
+type SwitchConnectInfo struct {
+	Addr   string
+	Header http.Header
+}
+
 type Config struct {
 	reconnectBackoff backoff
 	pingInterval     time.Duration
@@ -30,6 +35,11 @@ type Config struct {
 
 	noReconnect      bool
 	proxyConnFactory func(func() (*websocket.Conn, error)) func() (*websocket.Conn, error) // for testing
+
+	switchConnect []SwitchConnectInfo
+	switchFile    string
+	switchBackoff backoff
+	clientType    string
 }
 
 func defaultConfig() Config {

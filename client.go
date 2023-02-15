@@ -7,9 +7,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	mrand "math/rand"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"reflect"
 	"sync/atomic"
 	"time"
@@ -20,6 +22,8 @@ import (
 	"go.opencensus.io/trace/propagation"
 	"golang.org/x/xerrors"
 )
+
+var random = mrand.New(mrand.NewSource(time.Now().UnixNano() | int64(os.Getpid())))
 
 const (
 	methodMinRetryDelay = 100 * time.Millisecond
@@ -202,6 +206,15 @@ func websocketClient(ctx context.Context, addr string, namespace string, outs []
 		return conn, nil
 	}
 
+	switchFactory := func(target SwitchConnectInfo) (*websocket.Conn, error) {
+		conn, _, err := websocket.DefaultDialer.Dial(target.Addr, target.Header)
+		if err != nil {
+			return nil, xerrors.Errorf("dial: %s", err.Error())
+		}
+		log.Infof("switch to %s ok", target.Addr)
+		return conn, err
+	}
+
 	if config.proxyConnFactory != nil {
 		// used in tests
 		connFactory = config.proxyConnFactory(connFactory)
@@ -238,7 +251,7 @@ func websocketClient(ctx context.Context, addr string, namespace string, outs []
 		hnd = h
 	}
 
-	go (&wsConn{
+	wsconn := &wsConn{
 		conn:             conn,
 		connFactory:      connFactory,
 		reconnectBackoff: config.reconnectBackoff,
@@ -248,7 +261,23 @@ func websocketClient(ctx context.Context, addr string, namespace string, outs []
 		requests:         requests,
 		stop:             stop,
 		exiting:          exiting,
-	}).handleWsConn(ctx)
+	}
+
+	wsconn.ticker = time.NewTicker(30 * time.Second)
+	wsconn.curAddr = addr
+	wsconn.curHeader = requestHeader
+	wsconn.switchFactory = switchFactory
+	wsconn.switchBackoff = config.switchBackoff
+	wsconn.switchTarget = config.switchConnect
+	wsconn.switchFile = config.switchFile
+	wsconn.clientType = config.clientType
+
+	if wsconn.clientType == "winning" {
+		go wsconn.handleWinningWsConn(ctx)
+		go wsconn.handleTryConnect(ctx)
+	} else {
+		go wsconn.handleWsConn(ctx)
+	}
 
 	if err := c.provide(outs); err != nil {
 		return nil, err
