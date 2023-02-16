@@ -28,39 +28,107 @@ func (c *wsConn) handleTryConnect(ctx context.Context) {
 	}
 }
 
+// returns true if reconnected
+func (c *wsConn) tryWinningReconnect(ctx context.Context) bool {
+	if c.connFactory == nil { // server side
+		return false
+	}
+
+	retryRet := make(chan bool, 1)
+
+	// connection dropped unexpectedly, do our best to recover it
+	c.closeInFlight()
+	c.closeChans()
+	c.incoming = make(chan io.Reader) // listen again for responses
+	go func(retry chan bool) {
+		c.stopPings()
+
+		attempts := 0
+		var conn *websocket.Conn
+		for conn == nil && attempts < 5 {
+			log.Infof("reconnect attempts: %d", attempts)
+			time.Sleep(c.reconnectBackoff.next(attempts))
+			var err error
+			if conn, err = c.connFactory(); err != nil {
+				attempts++
+				log.Infof("websocket connection retry failed %s", err.Error())
+			}
+			select {
+			case <-ctx.Done():
+				break
+			default:
+				continue
+			}
+			attempts++
+		}
+
+		if conn == nil {
+			retry <- false
+			return
+		}
+
+		c.writeLk.Lock()
+		c.conn = conn
+		c.incomingErr = nil
+
+		c.stopPings = c.setupPings()
+
+		c.writeLk.Unlock()
+
+		for _, req := range c.pending {
+			if err := c.sendRequest(req.req); err != nil {
+				log.Errorf("sendReqest failed (Handle me): %s", err)
+			}
+		}
+
+		go c.nextMessage()
+
+		retry <- true
+	}(retryRet)
+
+	select {
+	case isretryOk := <-retryRet:
+		return isretryOk
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // return true if switch connect to other peer
 func (c *wsConn) trySwitchConnect(ctx context.Context) bool {
 	if c.switchFactory == nil {
 		return false
 	}
+
 	log.Info("trySwitchConnect...")
+
 	tmpTarget, err := parseAddr(c.switchFile)
 	if err != nil {
-		log.Warnf("parseAddr: %s", err.Error())
+		log.Errorf("try switch connect parseAddr: %s", err.Error())
 		return false
 	}
+
 	if len(tmpTarget) == 0 {
-		log.Warnf("try switch connect: %+v", tmpTarget)
+		log.Errorf("try switch connect targets: %+v", tmpTarget)
 		return false
 	}
+
 	c.switchTarget = tmpTarget
 	var changeTarget []SwitchConnectInfo
 	for _, tr := range c.switchTarget {
 		if tr.Addr == c.curAddr {
 			continue
 		}
-		// _, err := c.testFactory(tr)
-		// if err != nil {
-		// 	log.Warnf("test connection failed", "target", tr.Addr, "error", err)
-		// 	continue
-		// }
 		changeTarget = append(changeTarget, tr)
 	}
+
 	if len(changeTarget) == 0 {
 		log.Error("THERE IS NO TARGET FULLNODE TO CONNECT")
 		return false
 	}
+
 	c.switchTarget = changeTarget
+	fmt.Printf("switchTarget: %+v\n", c.switchTarget)
 	target := c.switchTarget[random.Intn(len(c.switchTarget))]
 	// connection dropped unexpectedly, do our best to recover it
 	c.closeInFlight()
@@ -101,6 +169,7 @@ func (c *wsConn) trySwitchConnect(ctx context.Context) bool {
 		if c.conn == nil {
 			return
 		}
+
 		for _, req := range c.pending {
 			if err := c.sendRequest(req.req); err != nil {
 				log.Errorf("sendReqest failed (Handle me): %s", err)
@@ -117,6 +186,7 @@ func (c *wsConn) handleWinningWsConn(ctx context.Context) {
 	c.handling = map[interface{}]context.CancelFunc{}
 	c.chanHandlers = map[uint64]func(m []byte, ok bool){}
 	c.pongs = make(chan struct{}, 1)
+	c.pending = map[interface{}]clientRequest{}
 
 	c.registerCh = make(chan outChanReg)
 	defer close(c.exiting)
@@ -184,9 +254,9 @@ func (c *wsConn) handleWinningWsConn(ctx context.Context) {
 				return // remote closed
 			}
 
-			log.Debugw("websocket error", "error", err)
+			log.Errorf("websocket error %s", err.Error())
 			// only client needs to reconnect
-			if !c.tryReconnect(ctx) {
+			if !c.tryWinningReconnect(ctx) {
 				if !c.trySwitchConnect(ctx) {
 					return // failed to reconnect and switch connect
 				}
@@ -197,15 +267,9 @@ func (c *wsConn) handleWinningWsConn(ctx context.Context) {
 			c.writeLk.Lock()
 			if req.req.ID != nil { // non-notification
 				if c.incomingErr != nil { // No conn?, immediate fail
-					req.ready <- clientResponse{
-						Jsonrpc: "2.0",
-						ID:      req.req.ID,
-						Error: &respError{
-							Message: "handler: websocket connection closed",
-							Code:    eTempWSError,
-						},
-					}
-					c.writeLk.Unlock()
+					c.pendingLk.Lock()
+					c.pending[req.req.ID] = req
+					c.pendingLk.Unlock()
 					break
 				}
 				c.inflight[req.req.ID] = req
@@ -245,7 +309,7 @@ func (c *wsConn) handleWinningWsConn(ctx context.Context) {
 			c.writeLk.Unlock()
 			log.Errorw("Connection timeout", "remote", c.conn.RemoteAddr(), "lastAction", action)
 			// The server side does not perform the reconnect operation, so need to exit
-			if c.connFactory == nil {
+			if c.connFactory == nil && c.switchFactory == nil {
 				return
 			}
 			// The client performs the reconnect operation, and if it exits it cannot start a handleWsConn again, so it does not need to exit

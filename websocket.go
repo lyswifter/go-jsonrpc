@@ -524,6 +524,10 @@ func (c *wsConn) closeInFlight() {
 	c.handling = map[interface{}]context.CancelFunc{}
 }
 
+func (c *wsConn) closePending() {
+	c.pending = map[interface{}]clientRequest{}
+}
+
 func (c *wsConn) closeChans() {
 	for chid := range c.chanHandlers {
 		hnd := c.chanHandlers[chid]
