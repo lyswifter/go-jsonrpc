@@ -56,6 +56,11 @@ func defaultConfig() Config {
 		paramEncoders: map[reflect.Type]ParamEncoder{},
 
 		httpClient: _defaultHTTPClient,
+
+		switchBackoff: backoff{
+			minDelay: 100 * time.Millisecond,
+			maxDelay: 5 * time.Second,
+		},
 	}
 }
 
