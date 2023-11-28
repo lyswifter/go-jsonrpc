@@ -39,13 +39,13 @@ func (a APIInfo) DialArgs() (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return "ws://" + addr + "/rpc/v0", nil
+		return "ws://" + addr + "/rpc/v1", nil
 	}
 	_, err = url.Parse(a.Addr)
 	if err != nil {
 		return "", err
 	}
-	return a.Addr + "/rpc/v0", nil
+	return a.Addr + "/rpc/v1", nil
 }
 
 func (a APIInfo) Host() (string, error) {
